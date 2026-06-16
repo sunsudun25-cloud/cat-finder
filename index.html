@@ -35,6 +35,7 @@
   details { background:#1c1c1c; border-radius:8px; margin:8px 0; padding:8px 12px; }
   details summary { cursor:pointer; font-weight:bold; }
   .geminiResultImgWrap { width:100%; margin-top:10px; }
+  #refBlock { background:#1a1a1a; border-radius:10px; padding:10px; margin-bottom:14px; }
 </style>
 </head>
 <body>
@@ -72,6 +73,17 @@
   <h1 class="title">AI 정밀분석 (Gemini)</h1>
   <p class="note">사진을 한 장 촬영하거나 업로드하세요. AI가 사진 속에 고양이가 실제로 보이는지 확인하고, 숨을 만한 장소도 알려줍니다. 인터넷 연결과 Gemini API 키가 필요합니다.</p>
   <input type="password" id="geminiApiKey" placeholder="Gemini API 키 입력">
+
+  <div id="refBlock">
+    <div id="refStatus" class="status" style="font-size:13px; color:#aaa;">기준 사진이 없습니다. 등록하면 내 고양이를 더 정확하게 찾아줍니다.</div>
+    <input type="file" accept="image/*" id="refFileInput">
+    <button id="refSetBtn" class="bigBtn" style="background:#2a9d8f;">내 고양이 기준 사진 등록/변경</button>
+    <br>
+    <img id="refThumb" style="display:none; width:80px; height:80px; object-fit:cover; border-radius:8px; border:2px solid #2a9d8f; margin:6px 0;">
+    <br>
+    <button id="refClearBtn" style="display:none; background:none; border:none; color:#e63946; font-size:13px; text-decoration:underline; padding:4px 0; margin-bottom:8px;">기준 사진 삭제</button>
+  </div>
+
   <input type="file" accept="image/*" capture="environment" id="geminiFileInput">
   <button id="geminiCaptureBtn" class="bigBtn">사진 촬영 / 선택</button>
   <button id="geminiAnalyzeBtn" class="bigBtn" style="background:#457b9d; display:none;">분석 시작</button>
@@ -362,6 +374,54 @@ geminiApiKeyInput.addEventListener('change', function() {
   localStorage.setItem('geminiApiKey', geminiApiKeyInput.value);
 });
 
+/* ---- reference photo of the owner's own cat, for appearance comparison ---- */
+const refFileInput = document.getElementById('refFileInput');
+const refSetBtn = document.getElementById('refSetBtn');
+const refThumb = document.getElementById('refThumb');
+const refClearBtn = document.getElementById('refClearBtn');
+const refStatus = document.getElementById('refStatus');
+
+let referenceBase64 = localStorage.getItem('catReferencePhoto') || null;
+if (referenceBase64) {
+  refThumb.src = 'data:image/jpeg;base64,' + referenceBase64;
+  refThumb.style.display = 'inline-block';
+  refClearBtn.style.display = 'inline-block';
+  refStatus.textContent = '기준 사진이 등록되어 있습니다. 분석 시 자동으로 비교합니다.';
+}
+
+refSetBtn.addEventListener('click', function() { refFileInput.click(); });
+
+refClearBtn.addEventListener('click', function() {
+  referenceBase64 = null;
+  localStorage.removeItem('catReferencePhoto');
+  refThumb.style.display = 'none';
+  refClearBtn.style.display = 'none';
+  refStatus.textContent = '기준 사진이 없습니다. 등록하면 내 고양이를 더 정확하게 찾아줍니다.';
+});
+
+refFileInput.addEventListener('change', function(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const img = new Image();
+  img.onload = function() {
+    const MAX = 300;
+    const scale = Math.min(1, MAX / Math.max(img.naturalWidth, img.naturalHeight));
+    const c = document.createElement('canvas');
+    c.width = Math.round(img.naturalWidth * scale);
+    c.height = Math.round(img.naturalHeight * scale);
+    const cctx = c.getContext('2d');
+    cctx.drawImage(img, 0, 0, c.width, c.height);
+    const dataUrl = c.toDataURL('image/jpeg', 0.85);
+    referenceBase64 = dataUrl.substring(dataUrl.indexOf(',') + 1);
+    localStorage.setItem('catReferencePhoto', referenceBase64);
+    refThumb.src = dataUrl;
+    refThumb.style.display = 'inline-block';
+    refClearBtn.style.display = 'inline-block';
+    refStatus.textContent = '기준 사진이 등록되었습니다. 분석 시 자동으로 비교합니다.';
+  };
+  img.src = URL.createObjectURL(file);
+});
+
 geminiCaptureBtn.addEventListener('click', function() { geminiFileInput.click(); });
 geminiFileInput.addEventListener('change', function(e) {
   const file = e.target.files[0];
@@ -418,15 +478,25 @@ const GEMINI_SCHEMA = {
   required: ['cat_detected', 'cat_sightings', 'hiding_spots']
 };
 
-const GEMINI_PROMPT = "You are a lost-cat search expert. Analyze the attached photo in two steps. " +
-  "Step 1, direct detection: carefully check whether any part of a cat is actually " +
-  "visible (full body, eyes, fur, tail, silhouette). If visible, set cat_detected to " +
-  "true and record the exact location and what is seen in cat_sightings. If not " +
-  "visible, set cat_detected to false and leave cat_sightings empty. " +
-  "Step 2, hiding spot estimation: even if no cat is directly visible, find every " +
-  "narrow, dark, enclosed gap or space where a frightened cat could be hiding and " +
-  "record it in hiding_spots. " +
-  "Map every location precisely as ymin xmin ymax xmax normalized to 0-1000.";
+function buildGeminiPrompt(hasReference) {
+  let p = "You are a lost-cat search expert. ";
+  if (hasReference) {
+    p += "The FIRST image attached is a reference photo of the specific cat that is lost (the owner's own cat). The SECOND image is a new photo taken while searching for it. Only analyze the SECOND image for detections; use the FIRST image only as a visual reference for comparison. ";
+  }
+  p += "Analyze the search photo in two steps. " +
+    "Step 1, direct detection: carefully check whether any part of a cat is actually " +
+    "visible in the search photo (full body, eyes, fur, tail, silhouette). If visible, set cat_detected to " +
+    "true and record the exact location and what is seen in cat_sightings. ";
+  if (hasReference) {
+    p += "For each sighting, also compare its fur color, pattern, and body shape against the reference photo, and add that comparison directly into the description field, for example 'white cat with brown patches, color and pattern match the reference photo' or 'black cat, does not match the reference photo, may be a different cat'. Keep confidence as your estimate of how certain you are that a cat is present at all. ";
+  }
+  p += "If no cat is visible in the search photo, set cat_detected to false and leave cat_sightings empty. " +
+    "Step 2, hiding spot estimation: even if no cat is directly visible, find every " +
+    "narrow, dark, enclosed gap or space in the search photo where a frightened cat could be hiding and " +
+    "record it in hiding_spots. " +
+    "Map every location precisely as ymin xmin ymax xmax normalized to 0-1000, all coordinates relative to the search photo.";
+  return p;
+}
 
 function fileToBase64(file) {
   return new Promise(function(resolve, reject) {
@@ -454,16 +524,19 @@ geminiAnalyzeBtn.addEventListener('click', async function() {
     const base64Data = await fileToBase64(file);
     const mimeType = file.type || 'image/jpeg';
 
+    const parts = [{ text: buildGeminiPrompt(!!referenceBase64) }];
+    if (referenceBase64) {
+      parts.push({ text: 'Reference photo (the lost cat):' });
+      parts.push({ inlineData: { mimeType: 'image/jpeg', data: referenceBase64 } });
+      parts.push({ text: 'Search photo (analyze this one):' });
+    }
+    parts.push({ inlineData: { mimeType: mimeType, data: base64Data } });
+
     const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
       body: JSON.stringify({
-        contents: [{
-          parts: [
-            { text: GEMINI_PROMPT },
-            { inlineData: { mimeType: mimeType, data: base64Data } }
-          ]
-        }],
+        contents: [{ parts: parts }],
         generationConfig: {
           responseMimeType: 'application/json',
           responseSchema: GEMINI_SCHEMA,
