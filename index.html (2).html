@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cat Finder</title>
+<style>
+  html, body { margin:0; padding:0; background:#111; color:#eee; font-family:-apple-system, sans-serif; }
+  #tabbar { display:flex; position:sticky; top:0; z-index:50; background:#000; }
+  #tabbar button { flex:1; padding:14px 0; background:#000; color:#aaa; border:none; border-bottom:3px solid transparent; font-size:14px; }
+  #tabbar button.active { color:#fff; border-bottom-color:#e63946; font-weight:bold; }
+  .panel { display:none; padding:16px; }
+  .panel.active { display:block; }
+
+  #livePanel.active { padding:0; }
+  #liveWrap { position:relative; width:100%; height:calc(100vh - 48px); overflow:hidden; background:#000; }
+  #liveWrap video, #liveWrap canvas { position:absolute; top:0; left:0; width:100%; height:100%; object-fit:cover; }
+  #liveOverlay { pointer-events:none; }
+  #liveStatus { position:absolute; top:10px; left:10px; right:10px; z-index:10; background:rgba(0,0,0,0.6); padding:8px 12px; border-radius:8px; font-size:14px; text-align:center; }
+  #liveStartBtn { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); z-index:20; padding:16px 24px; font-size:18px; background:#e63946; color:white; border:none; border-radius:10px; }
+
+  h1.title { font-size:18px; margin-top:0; }
+  p.note { color:#aaa; font-size:14px; line-height:1.5; }
+  .bigBtn { display:block; width:100%; padding:16px; font-size:18px; background:#e63946; color:white; border:none; border-radius:10px; margin:12px 0; }
+  input[type=file] { display:none; }
+  .controls { margin:12px 0; }
+  .controls label { font-size:14px; display:block; margin-bottom:4px; }
+  canvas.resultCanvas { width:100%; border-radius:8px; display:block; }
+  .status { margin:10px 0; font-size:15px; font-weight:bold; }
+  #nightThumbs { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+  .thumb { text-align:center; }
+  .thumb canvas { width:70px; height:70px; border:2px solid #ffd23f; border-radius:6px; }
+  .thumb span { display:block; font-size:12px; color:#ffd23f; }
+  input[type=password] { width:100%; box-sizing:border-box; padding:10px; font-size:14px; border-radius:8px; border:1px solid #444; background:#222; color:#eee; margin-bottom:8px; }
+  details { background:#1c1c1c; border-radius:8px; margin:8px 0; padding:8px 12px; }
+  details summary { cursor:pointer; font-weight:bold; }
+  .geminiResultImgWrap { width:100%; margin-top:10px; }
+</style>
+</head>
+<body>
+
+<div id="tabbar">
+  <button id="tabBtnLive" class="active">실시간(낮)</button>
+  <button id="tabBtnNight">야간 눈빛</button>
+  <button id="tabBtnGemini">AI 정밀분석</button>
+</div>
+
+<div id="livePanel" class="panel active">
+  <div id="liveWrap">
+    <video id="liveVideo" autoplay playsinline muted></video>
+    <canvas id="liveOverlay"></canvas>
+    <div id="liveStatus">모델 불러오는 중...</div>
+    <button id="liveStartBtn">카메라 시작</button>
+  </div>
+</div>
+
+<div id="nightPanel" class="panel">
+  <h1 class="title">야간 눈빛 반사 탐지기</h1>
+  <p class="note">손전등이나 카메라 플래시를 켜고 어두운 곳을 비춘 뒤 촬영하세요. 작고 밝게 빛나는 점(눈 반사 가능성)을 자동으로 표시합니다. 인터넷 연결 없이 동작합니다.</p>
+  <input type="file" accept="image/*" capture="environment" id="nightFileInput">
+  <button id="nightCaptureBtn" class="bigBtn">사진 촬영 / 다시 찍기</button>
+  <div class="controls">
+    <label>민감도(밝기 기준): <span id="nightThreshVal">230</span></label>
+    <input type="range" id="nightThreshSlider" min="180" max="255" value="230">
+  </div>
+  <div id="nightStatus" class="status">사진을 촬영하면 분석이 시작됩니다.</div>
+  <canvas id="nightCanvas" class="resultCanvas"></canvas>
+  <div id="nightThumbs"></div>
+</div>
+
+<div id="geminiPanel" class="panel">
+  <h1 class="title">AI 정밀분석 (Gemini)</h1>
+  <p class="note">사진을 한 장 촬영하거나 업로드하세요. AI가 사진 속에 고양이가 실제로 보이는지 확인하고, 숨을 만한 장소도 알려줍니다. 인터넷 연결과 Gemini API 키가 필요합니다.</p>
+  <input type="password" id="geminiApiKey" placeholder="Gemini API 키 입력">
+  <input type="file" accept="image/*" capture="environment" id="geminiFileInput">
+  <button id="geminiCaptureBtn" class="bigBtn">사진 촬영 / 선택</button>
+  <button id="geminiAnalyzeBtn" class="bigBtn" style="background:#457b9d; display:none;">분석 시작</button>
+  <div id="geminiStatus" class="status"></div>
+  <div class="geminiResultImgWrap">
+    <canvas id="geminiCanvas" class="resultCanvas"></canvas>
+  </div>
+  <div id="geminiDetails"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+<script>
+/* ---------------- TAB SWITCHING ---------------- */
+const tabButtons = { live: document.getElementById('tabBtnLive'), night: document.getElementById('tabBtnNight'), gemini: document.getElementById('tabBtnGemini') };
+const panels = { live: document.getElementById('livePanel'), night: document.getElementById('nightPanel'), gemini: document.getElementById('geminiPanel') };
+
+function switchTab(name) {
+  Object.keys(panels).forEach(function(k) {
+    panels[k].classList.toggle('active', k === name);
+    tabButtons[k].classList.toggle('active', k === name);
+  });
+  if (name !== 'live') stopLiveCamera();
+}
+
+tabButtons.live.addEventListener('click', function() { switchTab('live'); });
+tabButtons.night.addEventListener('click', function() { switchTab('night'); });
+tabButtons.gemini.addEventListener('click', function() { switchTab('gemini'); });
+
+/* ---------------- LIVE PANEL (daytime, on-device AI) ---------------- */
+const liveVideo = document.getElementById('liveVideo');
+const liveOverlay = document.getElementById('liveOverlay');
+const liveCtx = liveOverlay.getContext('2d');
+const liveStatus = document.getElementById('liveStatus');
+const liveStartBtn = document.getElementById('liveStartBtn');
+
+let cocoModel = null;
+let liveRunning = false;
+let liveStream = null;
+
+async function initLiveModel() {
+  liveStatus.textContent = 'AI 모델 불러오는 중... (최초 1회, 몇 초 소요)';
+  try {
+    cocoModel = await cocoSsd.load();
+    liveStatus.textContent = '모델 준비 완료. 카메라 시작 버튼을 누르세요.';
+  } catch (err) {
+    liveStatus.textContent = '모델 로딩 실패: ' + err.message;
+  }
+}
+
+async function startLiveCamera() {
+  try {
+    liveStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    });
+    liveVideo.srcObject = liveStream;
+    await liveVideo.play();
+    liveStartBtn.style.display = 'none';
+    resizeLiveOverlay();
+    liveRunning = true;
+    liveDetectLoop();
+  } catch (err) {
+    liveStatus.textContent = '카메라 접근 실패: ' + err.message;
+  }
+}
+
+function stopLiveCamera() {
+  liveRunning = false;
+  if (liveStream) {
+    liveStream.getTracks().forEach(function(t) { t.stop(); });
+    liveStream = null;
+  }
+  liveVideo.srcObject = null;
+  liveStartBtn.style.display = 'block';
+}
+
+function resizeLiveOverlay() {
+  liveOverlay.width = liveVideo.videoWidth;
+  liveOverlay.height = liveVideo.videoHeight;
+}
+
+async function liveDetectLoop() {
+  if (!cocoModel) return;
+  while (liveRunning) {
+    if (liveVideo.readyState >= 2) {
+      const predictions = await cocoModel.detect(liveVideo);
+      drawLivePredictions(predictions);
+    }
+    await new Promise(function(r) { setTimeout(r, 150); });
+  }
+}
+
+function drawLivePredictions(predictions) {
+  liveCtx.clearRect(0, 0, liveOverlay.width, liveOverlay.height);
+  let catCount = 0;
+  predictions.forEach(function(p) {
+    const isCat = p.class === 'cat';
+    if (isCat) catCount++;
+    const color = isCat ? '#39ff14' : 'rgba(255,255,255,0.35)';
+    const x = p.bbox[0], y = p.bbox[1], w = p.bbox[2], h = p.bbox[3];
+    liveCtx.strokeStyle = color;
+    liveCtx.lineWidth = isCat ? 4 : 1.5;
+    liveCtx.strokeRect(x, y, w, h);
+    liveCtx.fillStyle = color;
+    liveCtx.font = isCat ? 'bold 18px sans-serif' : '12px sans-serif';
+    const label = isCat ? ('고양이 ' + Math.round(p.score * 100) + '%') : p.class;
+    liveCtx.fillText(label, x + 4, y > 20 ? y - 6 : y + 16);
+  });
+  liveStatus.textContent = catCount > 0 ? ('고양이 감지! (' + catCount + ')') : '탐색 중...';
+}
+
+liveStartBtn.addEventListener('click', startLiveCamera);
+initLiveModel();
+
+/* ---------------- NIGHT PANEL (eye-shine, offline) ---------------- */
+const nightFileInput = document.getElementById('nightFileInput');
+const nightCaptureBtn = document.getElementById('nightCaptureBtn');
+const nightCanvas = document.getElementById('nightCanvas');
+const nightCtx = nightCanvas.getContext('2d');
+const nightStatus = document.getElementById('nightStatus');
+const nightThumbsEl = document.getElementById('nightThumbs');
+const nightThreshSlider = document.getElementById('nightThreshSlider');
+const nightThreshVal = document.getElementById('nightThreshVal');
+
+let nightCurrentImage = null;
+const NIGHT_MAX_DIM = 900;
+const NIGHT_MIN_BLOB_PIXELS = 2;
+const NIGHT_MAX_BLOB_PIXELS = 1500;
+const NIGHT_MAX_BLOB_DIM_RATIO = 0.07;
+
+nightCaptureBtn.addEventListener('click', function() { nightFileInput.click(); });
+nightFileInput.addEventListener('change', handleNightFile);
+nightThreshSlider.addEventListener('input', function() {
+  nightThreshVal.textContent = nightThreshSlider.value;
+  if (nightCurrentImage) nightProcess();
+});
+
+function handleNightFile(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  nightStatus.textContent = '이미지를 불러오는 중...';
+  const img = new Image();
+  img.onload = function() {
+    nightCurrentImage = img;
+    nightDrawScaled(img);
+    nightProcess();
+  };
+  img.onerror = function() { nightStatus.textContent = '이미지를 불러오지 못했습니다.'; };
+  img.src = URL.createObjectURL(file);
+}
+
+function nightDrawScaled(img) {
+  const w = img.naturalWidth, h = img.naturalHeight;
+  const scale = Math.min(1, NIGHT_MAX_DIM / Math.max(w, h));
+  nightCanvas.width = Math.round(w * scale);
+  nightCanvas.height = Math.round(h * scale);
+  nightCtx.drawImage(img, 0, 0, nightCanvas.width, nightCanvas.height);
+}
+
+function nightProcess() {
+  if (!nightCurrentImage) return;
+  nightStatus.textContent = '분석 중...';
+  nightDrawScaled(nightCurrentImage);
+  const w = nightCanvas.width, h = nightCanvas.height;
+  const imgData = nightCtx.getImageData(0, 0, w, h);
+  const data = imgData.data;
+  const threshold = parseInt(nightThreshSlider.value, 10);
+
+  const binary = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    const r = data[i * 4], g = data[i * 4 + 1], b = data[i * 4 + 2];
+    const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+    binary[i] = lum >= threshold ? 1 : 0;
+  }
+
+  const labels = new Int32Array(w * h).fill(-1);
+  const blobs = [];
+  const stack = new Int32Array(w * h);
+
+  for (let start = 0; start < w * h; start++) {
+    if (binary[start] !== 1 || labels[start] !== -1) continue;
+    let sp = 0;
+    stack[sp++] = start;
+    labels[start] = blobs.length;
+    let minX = start % w, maxX = start % w, minY = (start / w) | 0, maxY = (start / w) | 0, count = 0;
+
+    while (sp > 0) {
+      const p = stack[--sp];
+      const px = p % w, py = (p / w) | 0;
+      count++;
+      if (px < minX) minX = px;
+      if (px > maxX) maxX = px;
+      if (py < minY) minY = py;
+      if (py > maxY) maxY = py;
+
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          const nx = px + dx, ny = py + dy;
+          if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+          const np = ny * w + nx;
+          if (binary[np] === 1 && labels[np] === -1) {
+            labels[np] = blobs.length;
+            stack[sp++] = np;
+          }
+        }
+      }
+    }
+    blobs.push({ minX: minX, maxX: maxX, minY: minY, maxY: maxY, count: count });
+  }
+
+  const maxDim = Math.max(w, h);
+  const candidates = blobs.filter(function(b) {
+    const bw = b.maxX - b.minX + 1, bh = b.maxY - b.minY + 1;
+    if (b.count < NIGHT_MIN_BLOB_PIXELS || b.count > NIGHT_MAX_BLOB_PIXELS) return false;
+    if (bw > maxDim * NIGHT_MAX_BLOB_DIM_RATIO || bh > maxDim * NIGHT_MAX_BLOB_DIM_RATIO) return false;
+    return true;
+  });
+
+  nightDrawOverlay(candidates);
+  nightRenderThumbs(candidates);
+
+  if (candidates.length === 0) {
+    nightStatus.textContent = '의심되는 반사점을 찾지 못했습니다. 슬라이더를 왼쪽으로 옮겨 민감도를 낮춰보세요.';
+  } else {
+    nightStatus.textContent = candidates.length + '개의 의심되는 반사점을 발견했습니다.';
+  }
+}
+
+function nightDrawOverlay(candidates) {
+  nightCtx.lineWidth = 3;
+  nightCtx.strokeStyle = '#ffd23f';
+  nightCtx.font = 'bold 16px sans-serif';
+  nightCtx.fillStyle = '#ffd23f';
+  candidates.forEach(function(b, idx) {
+    const cx = (b.minX + b.maxX) / 2, cy = (b.minY + b.maxY) / 2;
+    const r = Math.max(b.maxX - b.minX, b.maxY - b.minY) / 2 + 10;
+    nightCtx.beginPath();
+    nightCtx.arc(cx, cy, r, 0, Math.PI * 2);
+    nightCtx.stroke();
+    nightCtx.fillText('#' + (idx + 1), cx + r + 2, cy);
+  });
+}
+
+function nightRenderThumbs(candidates) {
+  nightThumbsEl.innerHTML = '';
+  if (!nightCurrentImage) return;
+  const scaleBack = nightCurrentImage.naturalWidth / nightCanvas.width;
+  candidates.forEach(function(b, idx) {
+    const cx = (b.minX + b.maxX) / 2 * scaleBack;
+    const cy = (b.minY + b.maxY) / 2 * scaleBack;
+    const cropSize = Math.max((b.maxX - b.minX) * scaleBack, (b.maxY - b.minY) * scaleBack, 20) * 4;
+    const sx = Math.max(0, cx - cropSize / 2);
+    const sy = Math.max(0, cy - cropSize / 2);
+    const sw = Math.min(cropSize, nightCurrentImage.naturalWidth - sx);
+    const sh = Math.min(cropSize, nightCurrentImage.naturalHeight - sy);
+
+    const wrap = document.createElement('div');
+    wrap.className = 'thumb';
+    const tc = document.createElement('canvas');
+    tc.width = 80; tc.height = 80;
+    const tctx = tc.getContext('2d');
+    tctx.drawImage(nightCurrentImage, sx, sy, sw, sh, 0, 0, 80, 80);
+    const label = document.createElement('span');
+    label.textContent = '#' + (idx + 1);
+    wrap.appendChild(tc);
+    wrap.appendChild(label);
+    nightThumbsEl.appendChild(wrap);
+  });
+}
+
+/* ---------------- GEMINI PANEL (AI precise photo analysis) ---------------- */
+const geminiApiKeyInput = document.getElementById('geminiApiKey');
+const geminiFileInput = document.getElementById('geminiFileInput');
+const geminiCaptureBtn = document.getElementById('geminiCaptureBtn');
+const geminiAnalyzeBtn = document.getElementById('geminiAnalyzeBtn');
+const geminiStatus = document.getElementById('geminiStatus');
+const geminiCanvas = document.getElementById('geminiCanvas');
+const geminiCtx = geminiCanvas.getContext('2d');
+const geminiDetails = document.getElementById('geminiDetails');
+
+let geminiImage = null;
+
+const savedKey = localStorage.getItem('geminiApiKey');
+if (savedKey) geminiApiKeyInput.value = savedKey;
+geminiApiKeyInput.addEventListener('change', function() {
+  localStorage.setItem('geminiApiKey', geminiApiKeyInput.value);
+});
+
+geminiCaptureBtn.addEventListener('click', function() { geminiFileInput.click(); });
+geminiFileInput.addEventListener('change', function(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  geminiStatus.textContent = '이미지를 불러오는 중...';
+  const img = new Image();
+  img.onload = function() {
+    geminiImage = img;
+    geminiDrawBase(img);
+    geminiAnalyzeBtn.style.display = 'block';
+    geminiStatus.textContent = '사진이 준비되었습니다. 분석 시작 버튼을 누르세요.';
+    geminiDetails.innerHTML = '';
+  };
+  img.onerror = function() { geminiStatus.textContent = '이미지를 불러오지 못했습니다.'; };
+  img.src = URL.createObjectURL(file);
+});
+
+function geminiDrawBase(img) {
+  const MAX_DIM = 1000;
+  const scale = Math.min(1, MAX_DIM / Math.max(img.naturalWidth, img.naturalHeight));
+  geminiCanvas.width = Math.round(img.naturalWidth * scale);
+  geminiCanvas.height = Math.round(img.naturalHeight * scale);
+  geminiCtx.drawImage(img, 0, 0, geminiCanvas.width, geminiCanvas.height);
+}
+
+const GEMINI_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    cat_detected: { type: 'BOOLEAN' },
+    cat_sightings: {
+      type: 'ARRAY',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          box_2d: { type: 'ARRAY', items: { type: 'INTEGER' } },
+          confidence: { type: 'STRING' },
+          description: { type: 'STRING' }
+        }
+      }
+    },
+    hiding_spots: {
+      type: 'ARRAY',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          location_name: { type: 'STRING' },
+          probability: { type: 'STRING' },
+          box_2d: { type: 'ARRAY', items: { type: 'INTEGER' } },
+          reason: { type: 'STRING' }
+        }
+      }
+    }
+  },
+  required: ['cat_detected', 'cat_sightings', 'hiding_spots']
+};
+
+const GEMINI_PROMPT = "You are a lost-cat search expert. Analyze the attached photo in two steps. " +
+  "Step 1, direct detection: carefully check whether any part of a cat is actually " +
+  "visible (full body, eyes, fur, tail, silhouette). If visible, set cat_detected to " +
+  "true and record the exact location and what is seen in cat_sightings. If not " +
+  "visible, set cat_detected to false and leave cat_sightings empty. " +
+  "Step 2, hiding spot estimation: even if no cat is directly visible, find every " +
+  "narrow, dark, enclosed gap or space where a frightened cat could be hiding and " +
+  "record it in hiding_spots. " +
+  "Map every location precisely as ymin xmin ymax xmax normalized to 0-1000.";
+
+function fileToBase64(file) {
+  return new Promise(function(resolve, reject) {
+    const reader = new FileReader();
+    reader.onload = function() {
+      const result = reader.result;
+      const comma = result.indexOf(',');
+      resolve(result.substring(comma + 1));
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+geminiAnalyzeBtn.addEventListener('click', async function() {
+  const apiKey = geminiApiKeyInput.value.trim();
+  if (!apiKey) { geminiStatus.textContent = 'Gemini API 키를 입력해주세요.'; return; }
+  const file = geminiFileInput.files[0];
+  if (!file) { geminiStatus.textContent = '먼저 사진을 선택해주세요.'; return; }
+
+  geminiStatus.textContent = '분석 중... (몇 초 소요)';
+  geminiAnalyzeBtn.disabled = true;
+
+  try {
+    const base64Data = await fileToBase64(file);
+    const mimeType = file.type || 'image/jpeg';
+
+    const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+      body: JSON.stringify({
+        contents: [{
+          parts: [
+            { text: GEMINI_PROMPT },
+            { inlineData: { mimeType: mimeType, data: base64Data } }
+          ]
+        }],
+        generationConfig: {
+          responseMimeType: 'application/json',
+          responseSchema: GEMINI_SCHEMA,
+          temperature: 0.1
+        }
+      })
+    });
+
+    const json = await res.json();
+    if (!res.ok) {
+      throw new Error((json.error && json.error.message) || ('HTTP ' + res.status));
+    }
+    const text = json.candidates[0].content.parts[0].text;
+    const result = JSON.parse(text);
+    renderGeminiResult(result);
+  } catch (err) {
+    geminiStatus.textContent = '오류: ' + err.message;
+  } finally {
+    geminiAnalyzeBtn.disabled = false;
+  }
+});
+
+function renderGeminiResult(result) {
+  const catDetected = result.cat_detected;
+  const sightings = result.cat_sightings || [];
+  const spots = result.hiding_spots || [];
+
+  geminiDrawBase(geminiImage);
+  const w = geminiCanvas.width, h = geminiCanvas.height;
+
+  geminiCtx.lineWidth = 4;
+  sightings.forEach(function(s) {
+    const box = s.box_2d;
+    const top = (box[0] / 1000) * h, left = (box[1] / 1000) * w, bottom = (box[2] / 1000) * h, right = (box[3] / 1000) * w;
+    geminiCtx.strokeStyle = '#39ff14';
+    geminiCtx.strokeRect(left, top, right - left, bottom - top);
+    geminiCtx.fillStyle = '#39ff14';
+    geminiCtx.font = 'bold 16px sans-serif';
+    geminiCtx.fillText('CAT?', left + 4, Math.max(top - 8, 12));
+  });
+
+  geminiCtx.lineWidth = 3;
+  spots.forEach(function(s, idx) {
+    const box = s.box_2d;
+    const top = (box[0] / 1000) * h, left = (box[1] / 1000) * w, bottom = (box[2] / 1000) * h, right = (box[3] / 1000) * w;
+    geminiCtx.strokeStyle = '#ff4040';
+    geminiCtx.strokeRect(left, top, right - left, bottom - top);
+    geminiCtx.fillStyle = '#ff4040';
+    geminiCtx.font = 'bold 14px sans-serif';
+    geminiCtx.fillText('#' + (idx + 1), left + 4, top + 16);
+  });
+
+  if (catDetected && sightings.length > 0) {
+    geminiStatus.textContent = sightings.length + '곳에서 고양이로 추정되는 모습이 발견되었습니다!';
+  } else {
+    geminiStatus.textContent = '고양이가 명확히 보이지 않습니다. 아래 숨을 만한 장소를 확인하세요.';
+  }
+
+  let html = '';
+  if (sightings.length > 0) {
+    html += '<h3>고양이 발견 상세</h3>';
+    sightings.forEach(function(s, idx) {
+      html += '<details><summary>고양이 #' + (idx + 1) + ' - 확률: ' + s.confidence + '</summary><p>' + s.description + '</p></details>';
+    });
+  }
+  if (spots.length > 0) {
+    html += '<h3>수색 가이드</h3>';
+    spots.forEach(function(s, idx) {
+      html += '<details><summary>#' + (idx + 1) + ' [' + s.location_name + '] - 확률: ' + s.probability + '</summary><p>' + s.reason + '</p></details>';
+    });
+  }
+  geminiDetails.innerHTML = html;
+}
+</script>
+</body>
+</html>
