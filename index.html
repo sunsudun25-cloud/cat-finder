@@ -18,6 +18,13 @@
   #liveOverlay { pointer-events:none; }
   #liveStatus { position:absolute; top:10px; left:10px; right:10px; z-index:10; background:rgba(0,0,0,0.6); padding:8px 12px; border-radius:8px; font-size:14px; text-align:center; }
   #liveStartBtn { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); z-index:20; padding:16px 24px; font-size:18px; background:#e63946; color:white; border:none; border-radius:10px; }
+  #liveZoomControl { position:absolute; bottom:14px; left:10px; right:10px; z-index:10; background:rgba(0,0,0,0.55); padding:8px 10px; border-radius:8px; font-size:13px; }
+  #liveZoomControl label { display:block; margin-bottom:4px; }
+  #liveZoomControl input[type=range] { width:100%; }
+  #soundLog { margin-top:10px; font-size:13px; color:#aaa; max-height:200px; overflow-y:auto; }
+  #lureBlock { margin-top:22px; padding-top:14px; border-top:1px solid #333; }
+  #lureBlock h2 { font-size:16px; margin:0 0 8px; color:#e9c46a; }
+  #lureCountdown { font-size:13px; color:#ffd23f; margin-top:4px; }
 
   h1.title { font-size:18px; margin-top:0; }
   p.note { color:#aaa; font-size:14px; line-height:1.5; }
@@ -44,6 +51,7 @@
   <button id="tabBtnLive" class="active">실시간(낮)</button>
   <button id="tabBtnNight">야간 눈빛</button>
   <button id="tabBtnGemini">AI 정밀분석</button>
+  <button id="tabBtnSound">소리 기능</button>
 </div>
 
 <div id="livePanel" class="panel active">
@@ -52,6 +60,11 @@
     <canvas id="liveOverlay"></canvas>
     <div id="liveStatus">모델 불러오는 중...</div>
     <button id="liveStartBtn">카메라 시작</button>
+    <div id="liveZoomControl">
+      <label>디지털 줌 (먼 고양이 인식 향상): <span id="liveZoomVal">1.5x</span></label>
+      <input type="range" id="liveZoomSlider" min="1" max="3" step="0.5" value="1.5">
+      <label style="margin-top:8px; display:flex; align-items:center; gap:6px;"><input type="checkbox" id="liveSurveillanceToggle" style="width:auto;"> 무인 감시 모드 (감지 시 진동·소리 알림)</label>
+    </div>
   </div>
 </div>
 
@@ -94,12 +107,36 @@
   <div id="geminiDetails"></div>
 </div>
 
+<div id="soundPanel" class="panel">
+  <h1 class="title">야옹 소리 기능 (실험적)</h1>
+
+  <h2 style="font-size:16px; margin:14px 0 8px; color:#e9c46a;">1. 소리로 감지하기</h2>
+  <p class="note">마이크로 주변 소리를 들으며 고양이 울음소리(야옹/하악질 등)를 자동으로 인식합니다. AI 음향 인식 모델(YAMNet)을 사용하며, 최초 시작 시 모델을 내려받느라 시간이 걸릴 수 있습니다(와이파이 권장). 이 기능은 실험적이며, 다른 소리를 고양이 소리로 잘못 인식하거나 반대로 놓칠 수 있습니다.</p>
+  <button id="soundStartBtn" class="bigBtn">소리 감지 시작</button>
+  <button id="soundStopBtn" class="bigBtn" style="background:#444; display:none;">소리 감지 중지</button>
+  <div id="soundStatus" class="status">대기 중...</div>
+  <div id="soundLog"></div>
+
+  <div id="lureBlock">
+    <h2>2. 소리로 부르기 (유인)</h2>
+    <p class="note">평소 부르는 소리나 사료 흔드는 소리를 녹음해두면, 스피커로 반복 재생해 고양이를 유인할 수 있습니다. 최대 10초까지 녹음됩니다.</p>
+    <div id="lureStatus" class="status">녹음된 소리가 없습니다.</div>
+    <button id="lureRecordBtn" class="bigBtn" style="background:#2a9d8f;">녹음 시작</button>
+    <button id="lureStopRecordBtn" class="bigBtn" style="background:#444; display:none;">녹음 중지</button>
+    <div id="lureCountdown" style="display:none;"></div>
+    <audio id="lureAudioPlayer" style="width:100%; display:none; margin:8px 0;" controls></audio>
+    <button id="lurePlayLoopBtn" class="bigBtn" style="background:#e9c46a; color:#222; display:none;">반복 재생 시작</button>
+    <button id="lureStopLoopBtn" class="bigBtn" style="background:#444; display:none;">반복 재생 중지</button>
+    <button id="lureDeleteBtn" style="display:none; background:none; border:none; color:#e63946; font-size:13px; text-decoration:underline; padding:4px 0;">녹음 삭제</button>
+  </div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
 <script>
 /* ---------------- TAB SWITCHING ---------------- */
-const tabButtons = { live: document.getElementById('tabBtnLive'), night: document.getElementById('tabBtnNight'), gemini: document.getElementById('tabBtnGemini') };
-const panels = { live: document.getElementById('livePanel'), night: document.getElementById('nightPanel'), gemini: document.getElementById('geminiPanel') };
+const tabButtons = { live: document.getElementById('tabBtnLive'), night: document.getElementById('tabBtnNight'), gemini: document.getElementById('tabBtnGemini'), sound: document.getElementById('tabBtnSound') };
+const panels = { live: document.getElementById('livePanel'), night: document.getElementById('nightPanel'), gemini: document.getElementById('geminiPanel'), sound: document.getElementById('soundPanel') };
 
 function switchTab(name) {
   Object.keys(panels).forEach(function(k) {
@@ -107,11 +144,13 @@ function switchTab(name) {
     tabButtons[k].classList.toggle('active', k === name);
   });
   if (name !== 'live') stopLiveCamera();
+  if (name !== 'sound') { stopSoundDetection(); stopLureRecording(); stopLureLoop(); }
 }
 
 tabButtons.live.addEventListener('click', function() { switchTab('live'); });
 tabButtons.night.addEventListener('click', function() { switchTab('night'); });
 tabButtons.gemini.addEventListener('click', function() { switchTab('gemini'); });
+tabButtons.sound.addEventListener('click', function() { switchTab('sound'); });
 
 /* ---------------- LIVE PANEL (daytime, on-device AI) ---------------- */
 const liveVideo = document.getElementById('liveVideo');
@@ -119,15 +158,85 @@ const liveOverlay = document.getElementById('liveOverlay');
 const liveCtx = liveOverlay.getContext('2d');
 const liveStatus = document.getElementById('liveStatus');
 const liveStartBtn = document.getElementById('liveStartBtn');
+const liveZoomSlider = document.getElementById('liveZoomSlider');
+const liveZoomVal = document.getElementById('liveZoomVal');
+const liveSurveillanceToggle = document.getElementById('liveSurveillanceToggle');
 
 let cocoModel = null;
 let liveRunning = false;
 let liveStream = null;
+let liveZoomFactor = parseFloat(liveZoomSlider.value);
+let liveTickCount = 0;
+const liveZoomCanvas = document.createElement('canvas');
+const liveZoomCtx = liveZoomCanvas.getContext('2d');
+
+let liveSurveillanceOn = false;
+let liveWakeLock = null;
+let liveLastCatSeenTick = -1000;
+let liveAlertActive = false;
+let liveLastAlertTime = 0;
+const LIVE_ALERT_COOLDOWN_MS = 8000;
+const LIVE_NO_CAT_GRACE_TICKS = 5;
+
+liveZoomSlider.addEventListener('input', function() {
+  liveZoomFactor = parseFloat(liveZoomSlider.value);
+  liveZoomVal.textContent = liveZoomFactor + 'x';
+});
+
+liveSurveillanceToggle.addEventListener('change', function() {
+  liveSurveillanceOn = liveSurveillanceToggle.checked;
+  if (liveSurveillanceOn && liveRunning) acquireWakeLock();
+  if (!liveSurveillanceOn) releaseWakeLock();
+});
+
+document.addEventListener('visibilitychange', function() {
+  if (document.visibilityState === 'visible' && liveSurveillanceOn && liveRunning) acquireWakeLock();
+});
+
+async function acquireWakeLock() {
+  try {
+    if ('wakeLock' in navigator && !liveWakeLock) {
+      liveWakeLock = await navigator.wakeLock.request('screen');
+    }
+  } catch (err) {
+    liveWakeLock = null;
+  }
+}
+
+function releaseWakeLock() {
+  if (liveWakeLock) {
+    liveWakeLock.release().catch(function() {});
+    liveWakeLock = null;
+  }
+}
+
+function playBeep() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = 880;
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.3, ctx.currentTime + 0.05);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.4);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.45);
+    osc.onended = function() { ctx.close(); };
+  } catch (err) { /* ignore */ }
+}
+
+function triggerLiveAlert() {
+  if (navigator.vibrate) navigator.vibrate([200, 100, 200, 100, 200]);
+  playBeep();
+}
 
 async function initLiveModel() {
   liveStatus.textContent = 'AI 모델 불러오는 중... (최초 1회, 몇 초 소요)';
   try {
-    cocoModel = await cocoSsd.load();
+    cocoModel = await cocoSsd.load({ base: 'mobilenet_v2' });
     liveStatus.textContent = '모델 준비 완료. 카메라 시작 버튼을 누르세요.';
   } catch (err) {
     liveStatus.textContent = '모델 로딩 실패: ' + err.message;
@@ -145,6 +254,7 @@ async function startLiveCamera() {
     liveStartBtn.style.display = 'none';
     resizeLiveOverlay();
     liveRunning = true;
+    if (liveSurveillanceOn) acquireWakeLock();
     liveDetectLoop();
   } catch (err) {
     liveStatus.textContent = '카메라 접근 실패: ' + err.message;
@@ -159,18 +269,44 @@ function stopLiveCamera() {
   }
   liveVideo.srcObject = null;
   liveStartBtn.style.display = 'block';
+  releaseWakeLock();
+  liveAlertActive = false;
 }
 
 function resizeLiveOverlay() {
   liveOverlay.width = liveVideo.videoWidth;
   liveOverlay.height = liveVideo.videoHeight;
+  liveZoomCanvas.width = liveVideo.videoWidth;
+  liveZoomCanvas.height = liveVideo.videoHeight;
+}
+
+async function detectZoomed(zoom) {
+  const vw = liveVideo.videoWidth, vh = liveVideo.videoHeight;
+  if (!vw || !vh) return [];
+  const cw = vw / zoom, ch = vh / zoom;
+  const sx = (vw - cw) / 2, sy = (vh - ch) / 2;
+  liveZoomCtx.drawImage(liveVideo, sx, sy, cw, ch, 0, 0, vw, vh);
+  const predictions = await cocoModel.detect(liveZoomCanvas, 10, 0.4);
+  predictions.forEach(function(p) {
+    p.bbox[0] = sx + (p.bbox[0] / vw) * cw;
+    p.bbox[1] = sy + (p.bbox[1] / vh) * ch;
+    p.bbox[2] = (p.bbox[2] / vw) * cw;
+    p.bbox[3] = (p.bbox[3] / vh) * ch;
+  });
+  return predictions;
 }
 
 async function liveDetectLoop() {
   if (!cocoModel) return;
   while (liveRunning) {
     if (liveVideo.readyState >= 2) {
-      const predictions = await cocoModel.detect(liveVideo);
+      liveTickCount++;
+      let predictions;
+      if (liveZoomFactor > 1 && liveTickCount % 3 !== 0) {
+        predictions = await detectZoomed(liveZoomFactor);
+      } else {
+        predictions = await cocoModel.detect(liveVideo, 10, 0.4);
+      }
       drawLivePredictions(predictions);
     }
     await new Promise(function(r) { setTimeout(r, 150); });
@@ -194,9 +330,24 @@ function drawLivePredictions(predictions) {
     liveCtx.fillText(label, x + 4, y > 20 ? y - 6 : y + 16);
   });
   liveStatus.textContent = catCount > 0 ? ('고양이 감지! (' + catCount + ')') : '탐색 중...';
+
+  if (liveSurveillanceOn) {
+    const now = Date.now();
+    if (catCount > 0) {
+      liveLastCatSeenTick = liveTickCount;
+      if (!liveAlertActive || (now - liveLastAlertTime) >= LIVE_ALERT_COOLDOWN_MS) {
+        triggerLiveAlert();
+        liveLastAlertTime = now;
+        liveAlertActive = true;
+      }
+    } else if (liveTickCount - liveLastCatSeenTick > LIVE_NO_CAT_GRACE_TICKS) {
+      liveAlertActive = false;
+    }
+  }
 }
 
 liveStartBtn.addEventListener('click', startLiveCamera);
+liveZoomVal.textContent = liveZoomFactor + 'x';
 initLiveModel();
 
 /* ---------------- NIGHT PANEL (eye-shine, offline) ---------------- */
@@ -610,6 +761,336 @@ function renderGeminiResult(result) {
   }
   geminiDetails.innerHTML = html;
 }
+
+/* ---------------- SOUND PANEL (experimental cat-meow detection via YAMNet) ---------------- */
+const soundStartBtn = document.getElementById('soundStartBtn');
+const soundStopBtn = document.getElementById('soundStopBtn');
+const soundStatus = document.getElementById('soundStatus');
+const soundLog = document.getElementById('soundLog');
+
+let yamnetModel = null;
+let yamnetClassNames = null;
+let soundAudioCtx = null;
+let soundMicStream = null;
+let soundWorkletNode = null;
+let soundSourceNode = null;
+let soundRunning = false;
+let soundSampleBuffer = [];
+let soundBufferedSamples = 0;
+let soundProcessing = false;
+const SOUND_WINDOW_SECONDS = 1.0;
+const SOUND_TARGET_RATE = 16000;
+const SOUND_CAT_KEYWORDS = ['cat', 'meow', 'caterwaul', 'purr', 'hiss'];
+const SOUND_THRESHOLD = 0.15;
+
+function linearResample(buffer, fromRate, toRate) {
+  if (fromRate === toRate) return buffer;
+  const ratio = fromRate / toRate;
+  const newLength = Math.round(buffer.length / ratio);
+  const result = new Float32Array(newLength);
+  for (let i = 0; i < newLength; i++) {
+    const srcIndex = i * ratio;
+    const i0 = Math.floor(srcIndex);
+    const i1 = Math.min(i0 + 1, buffer.length - 1);
+    const frac = srcIndex - i0;
+    result[i] = buffer[i0] * (1 - frac) + buffer[i1] * frac;
+  }
+  return result;
+}
+
+async function ensureYamnetLoaded() {
+  if (yamnetModel) return;
+  soundStatus.textContent = 'AI 소리 인식 모델을 내려받는 중... (최초 1회, 용량이 크니 와이파이를 권장합니다)';
+  const modelUrl = 'https://tfhub.dev/google/tfjs-model/yamnet/tfjs/1';
+  yamnetModel = await tf.loadGraphModel(modelUrl, { fromTFHub: true });
+
+  try {
+    const csv = await fetch('https://raw.githubusercontent.com/tensorflow/models/master/research/audioset/yamnet/yamnet_class_map.csv').then(function(r) { return r.text(); });
+    const lines = csv.trim().split('\n').slice(1);
+    yamnetClassNames = lines.map(function(line) {
+      const parts = line.split(',');
+      return parts.slice(2).join(',').replace(/^"|"$/g, '');
+    });
+  } catch (err) {
+    yamnetClassNames = null;
+  }
+  soundStatus.textContent = '모델 준비 완료. 듣고 있습니다...';
+}
+
+function addSoundLog(text) {
+  const time = new Date().toLocaleTimeString('ko-KR');
+  const line = document.createElement('div');
+  line.textContent = '[' + time + '] ' + text;
+  soundLog.insertBefore(line, soundLog.firstChild);
+  while (soundLog.childNodes.length > 30) soundLog.removeChild(soundLog.lastChild);
+}
+
+async function processSoundWindow(samples, sampleRate) {
+  if (soundProcessing) return;
+  soundProcessing = true;
+  try {
+    const resampled = linearResample(samples, sampleRate, SOUND_TARGET_RATE);
+    const waveform = tf.tensor(resampled);
+    const result = yamnetModel.predict(waveform);
+    const scoresTensor = Array.isArray(result) ? result[0] : result;
+    const scoresData = await scoresTensor.array();
+    tf.dispose(waveform);
+    tf.dispose(result);
+
+    const frameCount = scoresData.length;
+    let bestScore = 0;
+    let bestClassName = '';
+    for (let f = 0; f < frameCount; f++) {
+      const frameScores = scoresData[f];
+      for (let c = 0; c < frameScores.length; c++) {
+        const name = yamnetClassNames ? yamnetClassNames[c] : null;
+        if (!name) continue;
+        const lower = name.toLowerCase();
+        const isCatClass = SOUND_CAT_KEYWORDS.some(function(kw) { return lower.indexOf(kw) !== -1; });
+        if (isCatClass && frameScores[c] > bestScore) {
+          bestScore = frameScores[c];
+          bestClassName = name;
+        }
+      }
+    }
+
+    if (bestScore >= SOUND_THRESHOLD) {
+      soundStatus.textContent = '고양이 소리 감지! (' + bestClassName + ', ' + Math.round(bestScore * 100) + '%)';
+      addSoundLog('고양이 소리 감지: ' + bestClassName + ' (' + Math.round(bestScore * 100) + '%)');
+    } else {
+      soundStatus.textContent = '듣고 있습니다... (마지막 확인: 고양이 소리 없음)';
+    }
+  } catch (err) {
+    soundStatus.textContent = '소리 분석 오류: ' + err.message;
+  } finally {
+    soundProcessing = false;
+  }
+}
+
+async function startSoundDetection() {
+  try {
+    soundStartBtn.disabled = true;
+    await ensureYamnetLoaded();
+
+    soundMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    soundAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+    const workletCode = "class CapturerProcessor extends AudioWorkletProcessor {" +
+      "process(inputs) {" +
+      "  const ch = inputs[0] && inputs[0][0];" +
+      "  if (ch) { this.port.postMessage(ch.slice()); }" +
+      "  return true;" +
+      "}}" +
+      "registerProcessor('capturer', CapturerProcessor);";
+    const blobUrl = URL.createObjectURL(new Blob([workletCode], { type: 'application/javascript' }));
+    await soundAudioCtx.audioWorklet.addModule(blobUrl);
+
+    soundSourceNode = soundAudioCtx.createMediaStreamSource(soundMicStream);
+    soundWorkletNode = new AudioWorkletNode(soundAudioCtx, 'capturer');
+    soundSampleBuffer = [];
+    soundBufferedSamples = 0;
+    const windowSize = Math.round(soundAudioCtx.sampleRate * SOUND_WINDOW_SECONDS);
+
+    soundWorkletNode.port.onmessage = function(e) {
+      if (!soundRunning) return;
+      soundSampleBuffer.push(e.data);
+      soundBufferedSamples += e.data.length;
+      if (soundBufferedSamples >= windowSize) {
+        const merged = new Float32Array(soundBufferedSamples);
+        let offset = 0;
+        soundSampleBuffer.forEach(function(chunk) {
+          merged.set(chunk, offset);
+          offset += chunk.length;
+        });
+        soundSampleBuffer = [];
+        soundBufferedSamples = 0;
+        processSoundWindow(merged, soundAudioCtx.sampleRate);
+      }
+    };
+
+    soundSourceNode.connect(soundWorkletNode);
+
+    soundRunning = true;
+    soundStartBtn.style.display = 'none';
+    soundStopBtn.style.display = 'block';
+    soundStatus.textContent = '듣고 있습니다...';
+  } catch (err) {
+    soundStatus.textContent = '마이크 접근 또는 모델 로딩 실패: ' + err.message;
+    soundStartBtn.disabled = false;
+  }
+}
+
+function stopSoundDetection() {
+  soundRunning = false;
+  if (soundWorkletNode) {
+    soundWorkletNode.port.onmessage = null;
+    soundWorkletNode.disconnect();
+    soundWorkletNode = null;
+  }
+  if (soundSourceNode) {
+    soundSourceNode.disconnect();
+    soundSourceNode = null;
+  }
+  if (soundMicStream) {
+    soundMicStream.getTracks().forEach(function(t) { t.stop(); });
+    soundMicStream = null;
+  }
+  if (soundAudioCtx) {
+    soundAudioCtx.close();
+    soundAudioCtx = null;
+  }
+  soundSampleBuffer = [];
+  soundBufferedSamples = 0;
+  soundStartBtn.disabled = false;
+  soundStartBtn.style.display = 'block';
+  soundStopBtn.style.display = 'none';
+  soundStatus.textContent = '대기 중...';
+}
+
+soundStartBtn.addEventListener('click', startSoundDetection);
+soundStopBtn.addEventListener('click', stopSoundDetection);
+
+/* ---------------- LURE PLAYBACK (call the cat back) ---------------- */
+const lureStatus = document.getElementById('lureStatus');
+const lureRecordBtn = document.getElementById('lureRecordBtn');
+const lureStopRecordBtn = document.getElementById('lureStopRecordBtn');
+const lureCountdown = document.getElementById('lureCountdown');
+const lureAudioPlayer = document.getElementById('lureAudioPlayer');
+const lurePlayLoopBtn = document.getElementById('lurePlayLoopBtn');
+const lureStopLoopBtn = document.getElementById('lureStopLoopBtn');
+const lureDeleteBtn = document.getElementById('lureDeleteBtn');
+
+const LURE_MAX_SECONDS = 10;
+let lureMicStream = null;
+let lureRecorder = null;
+let lureChunks = [];
+let lureCountdownTimer = null;
+
+const savedLure = localStorage.getItem('catLureSound');
+if (savedLure) {
+  lureAudioPlayer.src = savedLure;
+  lureAudioPlayer.style.display = 'block';
+  lurePlayLoopBtn.style.display = 'block';
+  lureDeleteBtn.style.display = 'inline-block';
+  lureStatus.textContent = '녹음된 소리가 있습니다. 재생해 고양이를 불러보세요.';
+}
+
+function pickLureMimeType() {
+  const candidates = ['audio/webm', 'audio/mp4', 'audio/ogg'];
+  for (let i = 0; i < candidates.length; i++) {
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(candidates[i])) {
+      return candidates[i];
+    }
+  }
+  return '';
+}
+
+async function startLureRecording() {
+  if (!window.MediaRecorder) {
+    lureStatus.textContent = '이 브라우저는 녹음 기능을 지원하지 않습니다.';
+    return;
+  }
+  stopSoundDetection();
+  stopLureLoop();
+  try {
+    lureRecordBtn.disabled = true;
+    lureMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mimeType = pickLureMimeType();
+    lureRecorder = mimeType ? new MediaRecorder(lureMicStream, { mimeType: mimeType }) : new MediaRecorder(lureMicStream);
+    lureChunks = [];
+    lureRecorder.ondataavailable = function(e) { if (e.data && e.data.size > 0) lureChunks.push(e.data); };
+    lureRecorder.onstop = function() {
+      const blob = new Blob(lureChunks, { type: lureRecorder.mimeType || 'audio/webm' });
+      const reader = new FileReader();
+      reader.onload = function() {
+        const dataUrl = reader.result;
+        try {
+          localStorage.setItem('catLureSound', dataUrl);
+        } catch (e) {
+          lureStatus.textContent = '녹음은 되었지만 저장 용량이 부족해 보관하지 못했습니다.';
+        }
+        lureAudioPlayer.src = dataUrl;
+        lureAudioPlayer.style.display = 'block';
+        lurePlayLoopBtn.style.display = 'block';
+        lureDeleteBtn.style.display = 'inline-block';
+        lureStatus.textContent = '녹음이 완료되었습니다. 재생해 고양이를 불러보세요.';
+      };
+      reader.readAsDataURL(blob);
+      if (lureMicStream) {
+        lureMicStream.getTracks().forEach(function(t) { t.stop(); });
+        lureMicStream = null;
+      }
+    };
+    lureRecorder.start();
+    lureStatus.textContent = '녹음 중입니다...';
+    lureRecordBtn.style.display = 'none';
+    lureStopRecordBtn.style.display = 'block';
+    lureCountdown.style.display = 'block';
+    let remaining = LURE_MAX_SECONDS;
+    lureCountdown.textContent = remaining + '초 남음 (최대 ' + LURE_MAX_SECONDS + '초)';
+    lureCountdownTimer = setInterval(function() {
+      remaining--;
+      if (remaining <= 0) {
+        stopLureRecording();
+      } else {
+        lureCountdown.textContent = remaining + '초 남음 (최대 ' + LURE_MAX_SECONDS + '초)';
+      }
+    }, 1000);
+  } catch (err) {
+    lureStatus.textContent = '마이크 접근 실패: ' + err.message;
+    lureRecordBtn.disabled = false;
+  }
+}
+
+function stopLureRecording() {
+  if (lureCountdownTimer) {
+    clearInterval(lureCountdownTimer);
+    lureCountdownTimer = null;
+  }
+  lureCountdown.style.display = 'none';
+  if (lureRecorder && lureRecorder.state !== 'inactive') {
+    lureRecorder.stop();
+  }
+  lureRecordBtn.disabled = false;
+  lureRecordBtn.style.display = 'block';
+  lureStopRecordBtn.style.display = 'none';
+}
+
+function startLureLoop() {
+  stopSoundDetection();
+  lureAudioPlayer.loop = true;
+  lureAudioPlayer.currentTime = 0;
+  lureAudioPlayer.play().catch(function(err) { lureStatus.textContent = '재생 실패: ' + err.message; });
+  lurePlayLoopBtn.style.display = 'none';
+  lureStopLoopBtn.style.display = 'block';
+  lureStatus.textContent = '반복 재생 중입니다...';
+}
+
+function stopLureLoop() {
+  lureAudioPlayer.loop = false;
+  lureAudioPlayer.pause();
+  lureAudioPlayer.currentTime = 0;
+  lurePlayLoopBtn.style.display = lureAudioPlayer.src ? 'block' : 'none';
+  lureStopLoopBtn.style.display = 'none';
+  if (lureAudioPlayer.src) lureStatus.textContent = '녹음된 소리가 있습니다. 재생해 고양이를 불러보세요.';
+}
+
+function deleteLureSound() {
+  stopLureLoop();
+  localStorage.removeItem('catLureSound');
+  lureAudioPlayer.removeAttribute('src');
+  lureAudioPlayer.style.display = 'none';
+  lurePlayLoopBtn.style.display = 'none';
+  lureStopLoopBtn.style.display = 'none';
+  lureDeleteBtn.style.display = 'none';
+  lureStatus.textContent = '녹음된 소리가 없습니다.';
+}
+
+lureRecordBtn.addEventListener('click', startLureRecording);
+lureStopRecordBtn.addEventListener('click', stopLureRecording);
+lurePlayLoopBtn.addEventListener('click', startLureLoop);
+lureStopLoopBtn.addEventListener('click', stopLureLoop);
+lureDeleteBtn.addEventListener('click', deleteLureSound);
 </script>
 </body>
 </html>
