@@ -64,6 +64,8 @@
       <label>디지털 줌 (먼 고양이 인식 향상): <span id="liveZoomVal">1.5x</span></label>
       <input type="range" id="liveZoomSlider" min="1" max="3" step="0.5" value="1.5">
       <label style="margin-top:8px; display:flex; align-items:center; gap:6px;"><input type="checkbox" id="liveSurveillanceToggle" style="width:auto;"> 무인 감시 모드 (감지 시 진동·소리 알림)</label>
+      <label style="margin-top:8px; display:flex; align-items:center; gap:6px;"><input type="checkbox" id="liveGeminiToggle" style="width:auto;"> Gemini 정밀 분석 모드 (5초마다 자동 분석, API 사용량 소액 발생)</label>
+      <div id="liveGeminiStatus" style="font-size:12px; color:#aaa; margin-top:4px; display:none;"></div>
     </div>
   </div>
 </div>
@@ -108,10 +110,10 @@
 </div>
 
 <div id="soundPanel" class="panel">
-  <h1 class="title">야옹 소리 기능 (실험적)</h1>
+  <h1 class="title">소리 기능</h1>
 
-  <h2 style="font-size:16px; margin:14px 0 8px; color:#e9c46a;">1. 소리로 감지하기</h2>
-  <p class="note">마이크로 주변 소리를 들으며 고양이 울음소리(야옹/하악질 등)를 자동으로 인식합니다. AI 음향 인식 모델(YAMNet)을 사용하며, 최초 시작 시 모델을 내려받느라 시간이 걸릴 수 있습니다(와이파이 권장). 이 기능은 실험적이며, 다른 소리를 고양이 소리로 잘못 인식하거나 반대로 놓칠 수 있습니다.</p>
+  <h2 style="font-size:16px; margin:14px 0 8px; color:#e9c46a;">1. 소리로 감지하기 (Gemini AI)</h2>
+  <p class="note">마이크로 몇 초씩 소리를 녹음해 Gemini AI에게 보내 고양이 울음소리(야옹/하악질/그르렁거림 등)인지 판단합니다. "AI 정밀분석" 탭에 입력한 Gemini API 키를 그대로 사용하며, 분석마다 소액의 API 사용량이 발생합니다. 인터넷 연결이 필요합니다.</p>
   <button id="soundStartBtn" class="bigBtn">소리 감지 시작</button>
   <button id="soundStopBtn" class="bigBtn" style="background:#444; display:none;">소리 감지 중지</button>
   <div id="soundStatus" class="status">대기 중...</div>
@@ -161,6 +163,8 @@ const liveStartBtn = document.getElementById('liveStartBtn');
 const liveZoomSlider = document.getElementById('liveZoomSlider');
 const liveZoomVal = document.getElementById('liveZoomVal');
 const liveSurveillanceToggle = document.getElementById('liveSurveillanceToggle');
+const liveGeminiToggle = document.getElementById('liveGeminiToggle');
+const liveGeminiStatusEl = document.getElementById('liveGeminiStatus');
 
 let cocoModel = null;
 let liveRunning = false;
@@ -178,6 +182,14 @@ let liveLastAlertTime = 0;
 const LIVE_ALERT_COOLDOWN_MS = 8000;
 const LIVE_NO_CAT_GRACE_TICKS = 5;
 
+let liveGeminiOn = false;
+let liveGeminiTimer = null;
+let liveGeminiBusy = false;
+let liveGeminiBoxes = [];
+let liveGeminiBoxesExpire = 0;
+const LIVE_GEMINI_INTERVAL_MS = 5000;
+const LIVE_GEMINI_BOX_TTL_MS = LIVE_GEMINI_INTERVAL_MS + 3000;
+
 liveZoomSlider.addEventListener('input', function() {
   liveZoomFactor = parseFloat(liveZoomSlider.value);
   liveZoomVal.textContent = liveZoomFactor + 'x';
@@ -188,6 +200,108 @@ liveSurveillanceToggle.addEventListener('change', function() {
   if (liveSurveillanceOn && liveRunning) acquireWakeLock();
   if (!liveSurveillanceOn) releaseWakeLock();
 });
+
+liveGeminiToggle.addEventListener('change', function() {
+  liveGeminiOn = liveGeminiToggle.checked;
+  liveGeminiStatusEl.style.display = liveGeminiOn ? 'block' : 'none';
+  if (liveGeminiOn) {
+    if (!geminiApiKeyInput.value.trim()) {
+      liveGeminiStatusEl.textContent = 'Gemini API 키가 필요합니다 ("AI 정밀분석" 탭에서 입력해주세요).';
+    }
+    startLiveGeminiLoop();
+  } else {
+    stopLiveGeminiLoop();
+  }
+});
+
+function startLiveGeminiLoop() {
+  stopLiveGeminiLoop();
+  liveGeminiTimer = setInterval(runLiveGeminiCheck, LIVE_GEMINI_INTERVAL_MS);
+  runLiveGeminiCheck();
+}
+
+function stopLiveGeminiLoop() {
+  if (liveGeminiTimer) {
+    clearInterval(liveGeminiTimer);
+    liveGeminiTimer = null;
+  }
+  liveGeminiBoxes = [];
+}
+
+async function runLiveGeminiCheck() {
+  if (!liveGeminiOn || !liveRunning || liveGeminiBusy) return;
+  const apiKey = geminiApiKeyInput.value.trim();
+  if (!apiKey) {
+    liveGeminiStatusEl.textContent = 'Gemini API 키가 필요합니다 ("AI 정밀분석" 탭에서 입력해주세요).';
+    return;
+  }
+  const vw = liveVideo.videoWidth, vh = liveVideo.videoHeight;
+  if (!vw || !vh) return;
+  liveGeminiBusy = true;
+  liveGeminiStatusEl.textContent = 'Gemini 정밀 분석 중...';
+  try {
+    const scale = Math.min(1, 900 / Math.max(vw, vh));
+    const c = document.createElement('canvas');
+    c.width = Math.round(vw * scale);
+    c.height = Math.round(vh * scale);
+    c.getContext('2d').drawImage(liveVideo, 0, 0, c.width, c.height);
+    const dataUrl = c.toDataURL('image/jpeg', 0.8);
+    const base64Data = dataUrl.substring(dataUrl.indexOf(',') + 1);
+
+    const parts = [{ text: buildGeminiPrompt(!!referenceBase64) }];
+    if (referenceBase64) {
+      parts.push({ text: 'Reference photo (the lost cat):' });
+      parts.push({ inlineData: { mimeType: 'image/jpeg', data: referenceBase64 } });
+      parts.push({ text: 'Search photo (analyze this one):' });
+    }
+    parts.push({ inlineData: { mimeType: 'image/jpeg', data: base64Data } });
+
+    const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+      body: JSON.stringify({
+        contents: [{ parts: parts }],
+        generationConfig: { responseMimeType: 'application/json', responseSchema: GEMINI_SCHEMA, temperature: 0.1 }
+      })
+    });
+    const json = await res.json();
+    if (!res.ok) throw new Error((json.error && json.error.message) || ('HTTP ' + res.status));
+    const text = json.candidates[0].content.parts[0].text;
+    const result = JSON.parse(text);
+    const sightings = result.cat_sightings || [];
+
+    liveGeminiBoxes = sightings.map(function(s) {
+      const box = s.box_2d;
+      return {
+        top: (box[0] / 1000) * liveOverlay.height,
+        left: (box[1] / 1000) * liveOverlay.width,
+        bottom: (box[2] / 1000) * liveOverlay.height,
+        right: (box[3] / 1000) * liveOverlay.width,
+        label: s.confidence || '?'
+      };
+    });
+    liveGeminiBoxesExpire = Date.now() + LIVE_GEMINI_BOX_TTL_MS;
+
+    const checkedAt = new Date().toLocaleTimeString('ko-KR');
+    if (sightings.length > 0) {
+      liveGeminiStatusEl.textContent = 'Gemini 확인: 고양이로 추정됨 (' + sightings.length + '곳, ' + checkedAt + ')';
+      if (liveSurveillanceOn) {
+        const now = Date.now();
+        if (!liveAlertActive || (now - liveLastAlertTime) >= LIVE_ALERT_COOLDOWN_MS) {
+          triggerLiveAlert();
+          liveLastAlertTime = now;
+          liveAlertActive = true;
+        }
+      }
+    } else {
+      liveGeminiStatusEl.textContent = 'Gemini 확인: 고양이 없음 (' + checkedAt + ')';
+    }
+  } catch (err) {
+    liveGeminiStatusEl.textContent = 'Gemini 분석 오류: ' + err.message;
+  } finally {
+    liveGeminiBusy = false;
+  }
+}
 
 document.addEventListener('visibilitychange', function() {
   if (document.visibilityState === 'visible' && liveSurveillanceOn && liveRunning) acquireWakeLock();
@@ -256,6 +370,7 @@ async function startLiveCamera() {
     liveRunning = true;
     if (liveSurveillanceOn) acquireWakeLock();
     liveDetectLoop();
+    if (liveGeminiOn) startLiveGeminiLoop();
   } catch (err) {
     liveStatus.textContent = '카메라 접근 실패: ' + err.message;
   }
@@ -271,6 +386,7 @@ function stopLiveCamera() {
   liveStartBtn.style.display = 'block';
   releaseWakeLock();
   liveAlertActive = false;
+  stopLiveGeminiLoop();
 }
 
 function resizeLiveOverlay() {
@@ -330,6 +446,17 @@ function drawLivePredictions(predictions) {
     liveCtx.fillText(label, x + 4, y > 20 ? y - 6 : y + 16);
   });
   liveStatus.textContent = catCount > 0 ? ('고양이 감지! (' + catCount + ')') : '탐색 중...';
+
+  if (liveGeminiOn && liveGeminiBoxes.length && Date.now() < liveGeminiBoxesExpire) {
+    liveCtx.lineWidth = 4;
+    liveGeminiBoxes.forEach(function(b) {
+      liveCtx.strokeStyle = '#b14aed';
+      liveCtx.strokeRect(b.left, b.top, b.right - b.left, b.bottom - b.top);
+      liveCtx.fillStyle = '#b14aed';
+      liveCtx.font = 'bold 16px sans-serif';
+      liveCtx.fillText('Gemini ' + b.label, b.left + 4, b.top > 20 ? b.top - 8 : b.top + 20);
+    });
+  }
 
   if (liveSurveillanceOn) {
     const now = Date.now();
@@ -762,14 +889,12 @@ function renderGeminiResult(result) {
   geminiDetails.innerHTML = html;
 }
 
-/* ---------------- SOUND PANEL (experimental cat-meow detection via YAMNet) ---------------- */
+/* ---------------- SOUND PANEL (cat-meow detection via Gemini audio analysis) ---------------- */
 const soundStartBtn = document.getElementById('soundStartBtn');
 const soundStopBtn = document.getElementById('soundStopBtn');
 const soundStatus = document.getElementById('soundStatus');
 const soundLog = document.getElementById('soundLog');
 
-let yamnetModel = null;
-let yamnetClassNames = null;
 let soundAudioCtx = null;
 let soundMicStream = null;
 let soundWorkletNode = null;
@@ -778,10 +903,19 @@ let soundRunning = false;
 let soundSampleBuffer = [];
 let soundBufferedSamples = 0;
 let soundProcessing = false;
-const SOUND_WINDOW_SECONDS = 1.0;
+const SOUND_WINDOW_SECONDS = 4.0;
 const SOUND_TARGET_RATE = 16000;
-const SOUND_CAT_KEYWORDS = ['cat', 'meow', 'caterwaul', 'purr', 'hiss'];
-const SOUND_THRESHOLD = 0.15;
+
+const SOUND_GEMINI_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    cat_sound_detected: { type: 'BOOLEAN' },
+    sound_type: { type: 'STRING' },
+    confidence: { type: 'STRING' },
+    description: { type: 'STRING' }
+  },
+  required: ['cat_sound_detected', 'sound_type', 'confidence', 'description']
+};
 
 function linearResample(buffer, fromRate, toRate) {
   if (fromRate === toRate) return buffer;
@@ -798,23 +932,32 @@ function linearResample(buffer, fromRate, toRate) {
   return result;
 }
 
-async function ensureYamnetLoaded() {
-  if (yamnetModel) return;
-  soundStatus.textContent = 'AI 소리 인식 모델을 내려받는 중... (최초 1회, 용량이 크니 와이파이를 권장합니다)';
-  const modelUrl = 'https://tfhub.dev/google/tfjs-model/yamnet/tfjs/1';
-  yamnetModel = await tf.loadGraphModel(modelUrl, { fromTFHub: true });
-
-  try {
-    const csv = await fetch('https://raw.githubusercontent.com/tensorflow/models/master/research/audioset/yamnet/yamnet_class_map.csv').then(function(r) { return r.text(); });
-    const lines = csv.trim().split('\n').slice(1);
-    yamnetClassNames = lines.map(function(line) {
-      const parts = line.split(',');
-      return parts.slice(2).join(',').replace(/^"|"$/g, '');
-    });
-  } catch (err) {
-    yamnetClassNames = null;
+function encodeWAV(samples, sampleRate) {
+  const buffer = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buffer);
+  function writeString(offset, str) {
+    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
   }
-  soundStatus.textContent = '모델 준비 완료. 듣고 있습니다...';
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + samples.length * 2, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeString(36, 'data');
+  view.setUint32(40, samples.length * 2, true);
+  let offset = 44;
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    offset += 2;
+  }
+  return new Blob([buffer], { type: 'audio/wav' });
 }
 
 function addSoundLog(text) {
@@ -825,39 +968,40 @@ function addSoundLog(text) {
   while (soundLog.childNodes.length > 30) soundLog.removeChild(soundLog.lastChild);
 }
 
-async function processSoundWindow(samples, sampleRate) {
+async function analyzeSoundWithGemini(wavBlob) {
   if (soundProcessing) return;
+  const apiKey = geminiApiKeyInput.value.trim();
+  if (!apiKey) {
+    soundStatus.textContent = 'Gemini API 키가 필요합니다. "AI 정밀분석" 탭에서 키를 먼저 입력해주세요.';
+    stopSoundDetection();
+    return;
+  }
   soundProcessing = true;
   try {
-    const resampled = linearResample(samples, sampleRate, SOUND_TARGET_RATE);
-    const waveform = tf.tensor(resampled);
-    const result = yamnetModel.predict(waveform);
-    const scoresTensor = Array.isArray(result) ? result[0] : result;
-    const scoresData = await scoresTensor.array();
-    tf.dispose(waveform);
-    tf.dispose(result);
-
-    const frameCount = scoresData.length;
-    let bestScore = 0;
-    let bestClassName = '';
-    for (let f = 0; f < frameCount; f++) {
-      const frameScores = scoresData[f];
-      for (let c = 0; c < frameScores.length; c++) {
-        const name = yamnetClassNames ? yamnetClassNames[c] : null;
-        if (!name) continue;
-        const lower = name.toLowerCase();
-        const isCatClass = SOUND_CAT_KEYWORDS.some(function(kw) { return lower.indexOf(kw) !== -1; });
-        if (isCatClass && frameScores[c] > bestScore) {
-          bestScore = frameScores[c];
-          bestClassName = name;
+    const base64Data = await fileToBase64(wavBlob);
+    const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+      body: JSON.stringify({
+        contents: [{ parts: [
+          { text: 'Listen to this short audio clip recorded outdoors while searching for a lost cat. Determine whether a cat sound (meowing, yowling, hissing, purring, or growling) is audible anywhere in the clip, even faintly or in the background, even mixed with other noise like traffic or wind. Respond with cat_sound_detected (true/false), sound_type (a short label of what you heard, e.g. "meow", "hiss", "no cat sound"), confidence (low/medium/high), and description (one short sentence in Korean).' },
+          { inlineData: { mimeType: 'audio/wav', data: base64Data } }
+        ] }],
+        generationConfig: {
+          responseMimeType: 'application/json',
+          responseSchema: SOUND_GEMINI_SCHEMA,
+          temperature: 0.1
         }
-      }
-    }
-
-    if (bestScore >= SOUND_THRESHOLD) {
-      soundStatus.textContent = '고양이 소리 감지! (' + bestClassName + ', ' + Math.round(bestScore * 100) + '%)';
-      addSoundLog('고양이 소리 감지: ' + bestClassName + ' (' + Math.round(bestScore * 100) + '%)');
-    } else {
+      })
+    });
+    const json = await res.json();
+    if (!res.ok) throw new Error((json.error && json.error.message) || ('HTTP ' + res.status));
+    const text = json.candidates[0].content.parts[0].text;
+    const result = JSON.parse(text);
+    if (result.cat_sound_detected) {
+      soundStatus.textContent = '고양이 소리 감지! (' + result.sound_type + ', 확신도: ' + result.confidence + ')';
+      addSoundLog('고양이 소리 감지: ' + result.sound_type + ' - ' + result.description);
+    } else if (soundRunning) {
       soundStatus.textContent = '듣고 있습니다... (마지막 확인: 고양이 소리 없음)';
     }
   } catch (err) {
@@ -868,9 +1012,14 @@ async function processSoundWindow(samples, sampleRate) {
 }
 
 async function startSoundDetection() {
+  const apiKey = geminiApiKeyInput.value.trim();
+  if (!apiKey) {
+    soundStatus.textContent = 'Gemini API 키가 필요합니다. "AI 정밀분석" 탭에서 키를 먼저 입력해주세요.';
+    return;
+  }
   try {
     soundStartBtn.disabled = true;
-    await ensureYamnetLoaded();
+    soundStatus.textContent = '마이크를 준비하는 중...';
 
     soundMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     soundAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -904,7 +1053,9 @@ async function startSoundDetection() {
         });
         soundSampleBuffer = [];
         soundBufferedSamples = 0;
-        processSoundWindow(merged, soundAudioCtx.sampleRate);
+        const resampled = linearResample(merged, soundAudioCtx.sampleRate, SOUND_TARGET_RATE);
+        const wavBlob = encodeWAV(resampled, SOUND_TARGET_RATE);
+        analyzeSoundWithGemini(wavBlob);
       }
     };
 
@@ -913,9 +1064,9 @@ async function startSoundDetection() {
     soundRunning = true;
     soundStartBtn.style.display = 'none';
     soundStopBtn.style.display = 'block';
-    soundStatus.textContent = '듣고 있습니다...';
+    soundStatus.textContent = '듣고 있습니다... (몇 초마다 Gemini로 분석)';
   } catch (err) {
-    soundStatus.textContent = '마이크 접근 또는 모델 로딩 실패: ' + err.message;
+    soundStatus.textContent = '마이크 접근 실패: ' + err.message;
     soundStartBtn.disabled = false;
   }
 }
